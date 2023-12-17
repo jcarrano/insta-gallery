@@ -1,0 +1,25 @@
+name = "insta-gallery"
+main = "./src/index.ts"
+compatibility_date = "2022-10-10"
+
+[triggers]
+crons = ["30 4 * * *"]
+
+# Variable bindings. These are arbitrary, plaintext strings (similar to environment variables)
+# Note: Use secrets to store sensitive data.
+# Docs: https://developers.cloudflare.com/workers/platform/environment-variables
+[vars]
+INSTAGRAM_APP_ID="330806199894044"
+R2_BUCKET_BASE="https://gallery-media.s7g.show"
+
+# Bind a KV Namespace. Use KV as persistent storage for small key-value pairs.
+# Docs: https://developers.cloudflare.com/workers/runtime-apis/kv
+[[kv_namespaces]]
+binding = "INSTA_GALLERY"
+id = "b55e639faf074621a496cb15210eb755"
+
+# Bind an R2 Bucket. Use R2 to store arbitrarily large blobs of data, such as files.
+# Docs: https://developers.cloudflare.com/r2/api/workers/workers-api-usage/
+[[r2_buckets]]
+binding = "INSTA_BUCKET"
+bucket_name = "s7g-insta"
