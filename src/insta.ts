@@ -124,7 +124,7 @@ type BaseFields = {
 	id: string;
 	timestamp: string;
 	permalink: string;
-    media_url: string;
+	media_url: string;
 };
 
 type MediaImage = {
@@ -137,7 +137,7 @@ type MediaVideo = {
 } & BaseFields;
 
 type MediaCarousel = {
-    media_type: 'CAROUSEL_ALBUM';
+	media_type: 'CAROUSEL_ALBUM';
 } & BaseFields;
 
 type Media = MediaImage | MediaVideo | MediaCarousel;
@@ -160,8 +160,8 @@ type MediaResponse = {
 class InstagramGraphApi {
 	private access_token: string;
 
-	constructor(access_token: string) {
-		this.access_token = access_token;
+	constructor(access_token: AccessToken) {
+		this.access_token = access_token.access_token;
 	}
 
 	/**
