@@ -1,5 +1,5 @@
 import { KVNamespace, R2Bucket } from '@cloudflare/workers-types';
-import { InstagramAuth, InstagramGraphApi } from './insta';
+import { InstagramAuth, InstagramGraphApi, AccessToken } from './insta';
 
 export interface Env {
 	INSTAGRAM_APP_ID: string;
@@ -46,15 +46,54 @@ async function downloadImage(env: Env, name: string, url: string): Promise<void>
 	});
 }
 
+type ErrorResponse = {
+	error: string;
+	status: number;
+};
+
+function getInstaAuth(env: Env, request?: Request): InstagramAuth | ErrorResponse {
+	const app_id = env.INSTAGRAM_APP_ID;
+	const app_secret = env.INSTAGRAM_APP_SECRET;
+
+	if (!app_id || !app_secret) {
+		return { error: 'Keys are not set up', status: 500 };
+	}
+
+	const redirect_uri = request ? getRedirectUri(request) : '';
+	const insta_auth = new InstagramAuth(app_id, redirect_uri, app_secret);
+	return insta_auth;
+}
+
+async function retrieveAccessToken(env: Env): Promise<AccessToken | ErrorResponse> {
+	const access_token_str = await env.INSTA_GALLERY.get('instagram-access-token');
+	if (!access_token_str) {
+		return { error: 'Not Authenticated', status: 401 };
+	}
+	const original_access_token = AccessToken.deserialize(access_token_str);
+	if (!original_access_token) {
+		return { error: 'Invalid access token', status: 500 };
+	}
+
+	const insta_auth = getInstaAuth(env);
+	if ('error' in insta_auth) {
+		return insta_auth;
+	}
+	const new_access_token = await insta_auth.refreshLongLivedToken(original_access_token);
+	if (!new_access_token) {
+		return { error: 'Error refreshing access token', status: 500 };
+	}
+	return new_access_token;
+}
+
 /**
  * Fetch the user's instagram gallery.
  *
  * Run this on a schedule to keep the gallery up to date.
  */
-async function fetchUserGallery(env: Env) {
-	const access_token = await env.INSTA_GALLERY.get('instagram-access-token');
-	if (!access_token) {
-		return;
+async function fetchUserGallery(env: Env): Promise<null | ErrorResponse> {
+	const access_token = await retrieveAccessToken(env);
+	if ('error' in access_token) {
+		return access_token
 	}
 
 	const insta_api = new InstagramGraphApi(access_token);
@@ -97,21 +136,30 @@ async function fetchUserGallery(env: Env) {
 	await Promise.all(promises);
 
 	await env.INSTA_BUCKET.put('gallery.json', galleryJson);
+	return null;
+}
+
+async function fetchUserGalleryWrapper(env: Env) {
+	const result = await fetchUserGallery(env);
+	if (result?.error) {
+		console.error(result.error);
+	}
 }
 
 /**
  * Instagram authentication flow.
  */
 async function fetchAuth(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-	const app_id = env.INSTAGRAM_APP_ID;
-	const app_secret = env.INSTAGRAM_APP_SECRET;
 	const config_key = env.GALLERY_CONFIG_KEY;
-
-	if (!app_id || !app_secret || !config_key) {
-		return new Response('Keys are not set up', { status: 500 });
+	if (!config_key) {
+		return new Response('Configuration Key not set up', { status: 500 });
 	}
 
-	const insta_auth = new InstagramAuth(app_id, getRedirectUri(request), app_secret);
+	const insta_auth = getInstaAuth(env, request);
+	if ('error' in insta_auth) {
+		return new Response(insta_auth.error, { status: insta_auth.status });
+	}
+
 	const url = new URL(request.url);
 	const queryParams = url.searchParams;
 
@@ -124,7 +172,7 @@ async function fetchAuth(request: Request, env: Env, ctx: ExecutionContext): Pro
 		return step1.response;
 	}
 
-	// if there is a query param for code, then we are finishing the auth process (transfer control to handleFinishAuth)
+	// if there is a query param for code, then we are finishing the auth process
 	const step2params = insta_auth.parseAuthStep2Params(queryParams);
 	if (step2params !== null) {
 		if (!(step2params.state === (await env.INSTA_GALLERY.get('auth-state')))) {
@@ -133,9 +181,19 @@ async function fetchAuth(request: Request, env: Env, ctx: ExecutionContext): Pro
 
 		const short_token = await insta_auth.getAccessToken(step2params.code);
 		await env.INSTA_GALLERY.delete('auth-state');
-		const long_token = await insta_auth.getLongLivedToken(short_token.access_token);
-		await env.INSTA_GALLERY.put('instagram-access-token', long_token.access_token);
-		await env.INSTA_GALLERY.put('instagram-user-id', long_token.user_id);
+		await env.INSTA_GALLERY.delete('instagram-access-token');
+
+		if (!short_token) {
+			return new Response('Error getting short lived token', { status: 500 });
+		}
+
+		const long_token = await insta_auth.getLongLivedToken(short_token);
+
+		if (!long_token) {
+			return new Response('Error getting long lived token', { status: 500 });
+		}
+
+		await env.INSTA_GALLERY.put('instagram-access-token', long_token.serialize());
 		return new Response('Authentication Successful');
 	}
 
@@ -254,8 +312,12 @@ async function updateForm(request: Request, env: Env): Promise<Response> {
 
 	if (queryKey) {
 		if (queryKey === config_key) {
-			await fetchUserGallery(env);
-			return new Response('Gallery Updated');
+			const result = await fetchUserGallery(env);
+			if (result?.error) {
+				return new Response(result.error, { status: result.status });
+			} else {
+				return new Response('Gallery Updated');
+			}
 		} else {
 			return new Response('Invalid Configuration Key', { status: 401 });
 		}

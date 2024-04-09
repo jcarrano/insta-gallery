@@ -13,10 +13,86 @@ type AuthStep2Params = {
 	state: string;
 };
 
-type AccessTokenResponse = {
+type ShortAccessToken = string;
+
+type ShortAccessTokenResponseR = {
 	access_token: string;
-	user_id: string;
+	user_id: number;
 };
+
+type AccessTokenResponseR = {
+	access_token: string;
+	token_type: string;
+	expires_in: number;
+};
+
+class AccessToken {
+	access_token: string;
+	token_type: string;
+	expires_at: Date;
+
+	constructor(access_token: string, token_type: string, expires_at: Date) {
+		this.access_token = access_token;
+		this.token_type = token_type;
+		this.expires_at = expires_at;
+	}
+
+	isExpired(): boolean {
+		return this.expires_at < new Date();
+	}
+
+	closeToExpiry(days_before: number): boolean {
+		const d = new Date(this.expires_at);
+		d.setDate(d.getDate() - days_before);
+		return d < new Date();
+	}
+
+	serialize(): string {
+		return JSON.stringify({
+			access_token: this.access_token,
+			token_type: this.token_type,
+			expires_at: this.expires_at.toISOString(),
+		});
+	}
+
+	static deserialize(s: string): AccessToken | null {
+		const obj = JSON.parse(s);
+
+		if (typeof obj.expires_at !== 'string') {
+			console.log('Invalid expires_at:', obj.expires_at);
+			return null;
+		}
+		if (typeof obj.access_token !== 'string') {
+			console.log('Invalid access_token:', obj.access_token);
+			return null;
+		}
+		if (typeof obj.token_type !== 'string') {
+			console.log('Invalid token_type:', obj.token_type);
+			return null;
+		}
+
+		return new AccessToken(obj.access_token, obj.token_type, new Date(obj.expires_at));
+	}
+
+	static fromResponse(r: AccessTokenResponseR): AccessToken {
+		return new AccessToken(
+			r.access_token,
+			r.token_type,
+			new Date(Date.now() + r.expires_in * 1000)
+		);
+	}
+}
+
+async function get_body_as_json<RType>(response: Response): Promise<RType | null> {
+	const response_obj = await response.json();
+
+	if (!response.ok) {
+		console.log('Error:', response.status, response_obj);
+		return null;
+	}
+
+	return response_obj as RType;
+}
 
 class InstagramAuth {
 	private client_id: string;
@@ -78,7 +154,7 @@ class InstagramAuth {
 	 * @param {*} code  The code obtained from the first step of the oauth flow.
 	 * @returns The access token.
 	 */
-	async getAccessToken(code: string): Promise<AccessTokenResponse> {
+	async getAccessToken(code: string): Promise<ShortAccessToken | null> {
 		const url = `https://api.instagram.com/oauth/access_token`;
 		const body = `client_id=${this.client_id}&client_secret=${this.app_secret}&grant_type=authorization_code&redirect_uri=${this.redirect_uri}&code=${code}`;
 
@@ -90,10 +166,12 @@ class InstagramAuth {
 			},
 		});
 
-		const json = await response.json();
-		const accessTokenResponse = json as AccessTokenResponse;
+		const short_tokenR = await get_body_as_json<ShortAccessTokenResponseR>(response);
+		if (!short_tokenR) {
+			return null;
+		}
 
-		return accessTokenResponse;
+		return short_tokenR.access_token;
 	}
 
 	/**
@@ -104,17 +182,44 @@ class InstagramAuth {
 	 *
 	 * @returns The long lived token.
 	 */
-	async getLongLivedToken(access_token: string): Promise<AccessTokenResponse> {
+	async getLongLivedToken(access_token: ShortAccessToken): Promise<AccessToken | null> {
 		const url = `${INSTA_GRAPH_URL}/access_token?grant_type=ig_exchange_token&client_secret=${this.app_secret}&access_token=${access_token}`;
 
 		const response = await fetch(url, {
 			method: 'GET',
 		});
 
-		const json = await response.json();
-		const accessTokenResponse = json as AccessTokenResponse;
+		const json = await get_body_as_json<AccessTokenResponseR>(response);
+		if (!json) {
+			return null;
+		}
+		return AccessToken.fromResponse(json);
+	}
 
-		return accessTokenResponse;
+	/**
+	 * Refresh the long lived token.
+	 *
+	 * The token is only refreshed if it is one month away from expiring.
+	 *
+	 * @param {*} access_token  The long lived token.
+	 */
+	async refreshLongLivedToken(access_token: AccessToken): Promise<AccessToken | null> {
+		if (!access_token.closeToExpiry(30)) {
+			return access_token;
+		}
+
+		console.log('Token close to expiry, refreshing...');
+		const url = `${INSTA_GRAPH_URL}/refresh_access_token?grant_type=ig_refresh_token&access_token=${access_token.access_token}`
+
+		const response = await fetch(url, {
+			method: 'GET',
+		});
+
+		const json = await get_body_as_json<AccessTokenResponseR>(response);
+		if (!json) {
+			return null;
+		}
+		return AccessToken.fromResponse(json);
 	}
 }
 
@@ -189,4 +294,4 @@ class InstagramGraphApi {
 	}
 }
 
-export { InstagramAuth, InstagramGraphApi };
+export { InstagramAuth, InstagramGraphApi, AccessToken };
